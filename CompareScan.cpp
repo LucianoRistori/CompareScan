@@ -57,6 +57,9 @@
 // Date:   October 2025
 //==============================================================================
 
+#define COMPARESCAN_VERSION "v1.0"
+
+
 #include <iostream>
 #include <fstream>
 #include <cmath>
@@ -100,8 +103,8 @@ int main(int argc,char*argv[]){
     string out=(argc>=4)?argv[3]:"CompareScan.root";
     if(out.rfind(".root")==string::npos) out+=".root";
     
-    cout << "\n====================================\n";
-	cout << " CompareScan v3.7 — Luciano Ristori\n";
+  	cout << "\n====================================\n";
+	cout << " CompareScan " << COMPARESCAN_VERSION << " — Luciano Ristori\n";
 	cout << " Built: " << __DATE__ << " " << __TIME__ << endl;
 	cout << "====================================\n";
 
