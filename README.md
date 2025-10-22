@@ -120,4 +120,15 @@ make clean && make
 ---
 
 ## Notes
-- Input and output coordinates are in mm; all differences are report
+- Input and output coordinates are in mm; all differences are reported in µm.  
+- The dZ color map auto-scales to data range but can be fixed via `SetMinimum()` / `SetMaximum()`.  
+- The program runs interactively with ROOT GUI (`gROOT->SetBatch(false)`).  
+- Histograms hDX, hDY, hDZ are written to the ROOT file but only hDZ is displayed.  
+- Tested on macOS and Linux with ROOT 6.20 and later.
+
+---
+
+## Author
+**Luciano Ristori**  
+Fermilab — SIDET / CMS precision metrology and CMM analysis  
+Version 3.7  ·  October 2025
