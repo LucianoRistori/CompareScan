@@ -99,6 +99,16 @@ int main(int argc,char*argv[]){
     string f1=argv[1], f2=argv[2];
     string out=(argc>=4)?argv[3]:"CompareScan.root";
     if(out.rfind(".root")==string::npos) out+=".root";
+    
+    cout << "\n====================================\n";
+	cout << " CompareScan v3.7 — Luciano Ristori\n";
+	cout << " Built: " << __DATE__ << " " << __TIME__ << endl;
+	cout << "====================================\n";
+
+	cout << "Input file 1: " << f1 << endl;
+	cout << "Input file 2: " << f2 << endl;
+	cout << "Output file : " << out << endl;
+
 
     vector<Point>A=readPoints(f1,4),B=readPoints(f2,4);
     if(A.empty()||B.empty()){cerr<<"Error reading files\n";return 1;}
@@ -255,11 +265,19 @@ int main(int argc,char*argv[]){
     gPad->Update();
 
     //------------------------------------------------------------------------------
+	// Save the displayed canvas to file
+	//------------------------------------------------------------------------------
+	string pngOut = out.substr(0, out.find_last_of(".")) + ".png";  // same name as ROOT file, but .png
+	c->SaveAs(pngOut.c_str());
+	cout << "Saved canvas image as " << pngOut << endl;
+
+	// Also write the canvas to the ROOT file
+	c->Write("CompareScanCanvas");
+	
     cout<<"\nWrote "<<out<<". Close the canvas to exit.\n";
-    app.Run();
     
-    outF.cd();            // make sure we’re writing into the ROOT file
-	c->Write("CompareScanCanvas");  // save full canvas with both pads
+    app.Run();
+  
 
     outF.Close();
     return 0;
