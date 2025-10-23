@@ -113,14 +113,14 @@ int main(int argc,char*argv[]){
 	cout << "Output file : " << out << endl;
 
 
-    vector<Point>A=readPoints(f1,4),B=readPoints(f2,4);
+    vector<Point>A=readPoints(f1,3),B=readPoints(f2,3);
     if(A.empty()||B.empty()){cerr<<"Error reading files\n";return 1;}
     size_t n=min(A.size(),B.size());
     vector<double>dX,dY,dZ,dR; dX.reserve(n);dY.reserve(n);dZ.reserve(n);dR.reserve(n);
     for(size_t i=0;i<n;++i){
-        double dx=B[i].coords[1]-A[i].coords[1];
-        double dy=B[i].coords[2]-A[i].coords[2];
-        double dz=B[i].coords[3]-A[i].coords[3];
+        double dx=B[i].coords[0]-A[i].coords[0];
+        double dy=B[i].coords[1]-A[i].coords[1];
+        double dz=B[i].coords[2]-A[i].coords[2];
         dX.push_back(dx); dY.push_back(dy); dZ.push_back(dz);
         dR.push_back(sqrt(dx*dx+dy*dy+dz*dz));
     }
@@ -182,8 +182,8 @@ int main(int argc,char*argv[]){
     //------------------------------------------------------------------------------
     vector<double> x,y,z;
     for(size_t i=0;i<n;++i){
-        x.push_back(A[i].coords[1]);
-        y.push_back(A[i].coords[2]);
+        x.push_back(A[i].coords[0]);
+        y.push_back(A[i].coords[1]);
         z.push_back(dZ[i]*1000.0); // µm
     }
 
