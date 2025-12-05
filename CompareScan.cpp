@@ -1,9 +1,46 @@
 //==============================================================================
 // File: CompareScan.cpp
-// Version: 3.9 (2D scatter, colored markers + dZ labels, no palette bar)
+// Version: 3.10
+//
+// Purpose:
+//   Compare N point files (same points, same ordering) and, for each point,
+//   compute the Z range across files:
+//
+//       Zmin(i) = min_k Z_k(i)
+//       Zmax(i) = max_k Z_k(i)
+//       Range(i) = Zmax(i) - Zmin(i)
+//
+//   Then:
+//     • Plot a 2D XY scatter where each point is colored by Range(i) in µm
+//     • Draw a 1D histogram of Range(i) in µm
+//     • Optionally label each point on the scatter with its Range(i) [µm]
+//     • Optionally write a CSV with per-point statistics across files.
+//
+// Usage:
+//   ./CompareScan [--labels] [--stats [stats.csv]] file1 file2 ... fileN [out.root]
+//
+//   - file1..fileN : point files to compare (N ≥ 2), each line: index X Y Z ...
+//   - out.root     : optional ROOT output file (default: CompareScan.root)
+//   - --labels     : draw integer µm range labels above each point
+//   - --stats      : enable statistics CSV output
+//       * If followed by a filename, use that (e.g. --stats myStats.csv)
+//       * Otherwise use: <root_output_basename>_stats.csv
+//
+// Output:
+//   - ROOT file (out.root) with:
+//       * XY scatter canvas (left pad)
+//       * Range histogram (right pad)
+//   - PNG snapshot of the canvas.
+//   - If --stats is used, a CSV with per-point statistics:
+//       index, X_mm, Y_mm, meanZ_mm, sigmaZ_um, rangeZ_um, Zmin_mm, Zmax_mm
+//
+// Notes:
+//   - X,Y are taken from the first file.
+//   - All files must have at least as many points as the shortest one; extra
+//     points in longer files are ignored (a warning is printed).
 //==============================================================================
 
-#define COMPARESCAN_VERSION "v1.0"
+#define COMPARESCAN_VERSION "v3.10"
 
 #include <iostream>
 #include <fstream>
@@ -30,9 +67,13 @@
 using namespace std;
 
 //------------------------------------------------------------------------------
-// Simple statistics container
+// Simple statistics container (used for global summaries)
 //------------------------------------------------------------------------------
-struct DiffStats { double mean=0, sigma=0; size_t n=0; };
+struct DiffStats {
+    double mean  = 0.0;
+    double sigma = 0.0;
+    size_t n     = 0;
+};
 
 DiffStats computeStats(const vector<double>& v) {
     DiffStats s;
@@ -49,87 +90,206 @@ DiffStats computeStats(const vector<double>& v) {
 }
 
 //------------------------------------------------------------------------------
+// Main
+//------------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
+    //--------------------------------------------------------------------------
+    // Parse command-line arguments
+    //--------------------------------------------------------------------------
+    bool drawLabels        = false;
+    bool doStats           = false;
+    bool statsCsvExplicit  = false;
+    string statsCsvName;
+    string outRoot = "CompareScan.root";
+
+    vector<string> positional;
+
     if (argc < 3) {
-        cerr << "Usage: " << argv[0] << " file1 file2 [out.root]\n";
+        cerr << "Usage:\n  " << argv[0]
+             << " [--labels] [--stats [stats.csv]] file1 file2 ... fileN [out.root]\n";
         return 1;
     }
 
-    string f1  = argv[1];
-    string f2  = argv[2];
-    string out = (argc >= 4) ? argv[3] : "CompareScan.root";
-    if (out.rfind(".root") == string::npos) out += ".root";
+    for (int i = 1; i < argc; ++i) {
+        string arg = argv[i];
 
+        if (arg == "--labels") {
+            drawLabels = true;
+            continue;
+        }
+
+        if (arg == "--stats") {
+            doStats = true;
+            // Optional CSV filename following --stats
+            if (i + 1 < argc) {
+                string next = argv[i+1];
+                if (next.rfind("--", 0) != 0) { // does not start with "--"
+                    statsCsvName    = next;
+                    statsCsvExplicit = true;
+                    ++i; // consume filename
+                }
+            }
+            continue;
+        }
+
+        // Otherwise, positional argument (file or out.root)
+        positional.push_back(arg);
+    }
+
+    if (positional.size() < 2) {
+        cerr << "Error: need at least two input files.\n";
+        cerr << "Usage:\n  " << argv[0]
+             << " [--labels] [--stats [stats.csv]] file1 file2 ... fileN [out.root]\n";
+        return 1;
+    }
+
+    // Last positional argument may be a ROOT filename
+    {
+        const string& last = positional.back();
+        if (last.size() >= 5 && last.substr(last.size()-5) == ".root") {
+            outRoot = last;
+            positional.pop_back();
+        }
+    }
+
+    if (positional.size() < 2) {
+        cerr << "Error: after removing ROOT output, fewer than two input files remain.\n";
+        return 1;
+    }
+
+    // Determine default stats CSV name if needed
+    if (doStats && !statsCsvExplicit) {
+        string base = outRoot;
+        size_t dotPos = base.find_last_of('.');
+        if (dotPos != string::npos) {
+            base = base.substr(0, dotPos);
+        }
+        statsCsvName = base + "_stats.csv";
+    }
+
+    //--------------------------------------------------------------------------
+    // Print basic info
+    //--------------------------------------------------------------------------
     cout << "\n====================================\n";
-    cout << " CompareScan " << COMPARESCAN_VERSION << " — Luciano Ristori\n";
-    cout << " Built: " << __DATE__ << " " << __TIME__ << endl;
+    cout << " CompareScan " << COMPARESCAN_VERSION << " — multi-file Z range\n";
+    cout << " Built: " << __DATE__ << " " << __TIME__ << "\n";
     cout << "====================================\n";
 
-    cout << "Input file 1: " << f1 << endl;
-    cout << "Input file 2: " << f2 << endl;
-    cout << "Output file : " << out << endl;
+    cout << "Number of input files: " << positional.size() << "\n";
+    for (size_t i = 0; i < positional.size(); ++i) {
+        cout << "  File " << (i+1) << ": " << positional[i] << "\n";
+    }
+    cout << "Output ROOT file : " << outRoot << "\n";
+    if (doStats) {
+        cout << "Stats CSV output : " << statsCsvName << "\n";
+    }
+    cout << "Labels on scatter: " << (drawLabels ? "ON" : "OFF") << "\n";
 
-    // Read points
-    vector<Point> A = readPoints(f1, 3);
-    vector<Point> B = readPoints(f2, 3);
-    if (A.empty() || B.empty()) {
-        cerr << "Error reading files\n";
+    //--------------------------------------------------------------------------
+    // Read all point files
+    //--------------------------------------------------------------------------
+    int nFiles = static_cast<int>(positional.size());
+    vector< vector<Point> > allPoints(nFiles);
+
+    for (int k = 0; k < nFiles; ++k) {
+        allPoints[k] = readPoints(positional[k], 3);
+        if (allPoints[k].empty()) {
+            cerr << "Error: file " << positional[k] << " produced no points.\n";
+            return 1;
+        }
+    }
+
+    // Check point counts (use minimum across files)
+    size_t nPoints = allPoints[0].size();
+    bool sizeMismatch = false;
+    for (int k = 1; k < nFiles; ++k) {
+        if (allPoints[k].size() != nPoints) {
+            sizeMismatch = true;
+            nPoints = std::min(nPoints, allPoints[k].size());
+        }
+    }
+    if (sizeMismatch) {
+        cerr << "Warning: input files have different numbers of points.\n"
+             << "         Using first " << nPoints << " points common to all files.\n";
+    }
+
+    if (nPoints == 0) {
+        cerr << "Error: no common points to compare.\n";
         return 1;
     }
 
-    size_t n = std::min(A.size(), B.size());
+    //--------------------------------------------------------------------------
+    // Per-point statistics across files
+    //--------------------------------------------------------------------------
+    vector<double> X(nPoints), Y(nPoints);
+    vector<double> meanZ_mm(nPoints), sigmaZ_um(nPoints), rangeZ_um(nPoints);
+    vector<double> Zmin_mm(nPoints), Zmax_mm(nPoints);
 
-    vector<double> dX, dY, dZ, dR;
-    dX.reserve(n);
-    dY.reserve(n);
-    dZ.reserve(n);
-    dR.reserve(n);
+    for (size_t i = 0; i < nPoints; ++i) {
+        // Use coordinates from first file
+        X[i] = allPoints[0][i].coords[0];
+        Y[i] = allPoints[0][i].coords[1];
 
-    for (size_t i = 0; i < n; ++i) {
-        double dx = B[i].coords[0] - A[i].coords[0];
-        double dy = B[i].coords[1] - A[i].coords[1];
-        double dz = B[i].coords[2] - A[i].coords[2];
-        dX.push_back(dx);
-        dY.push_back(dy);
-        dZ.push_back(dz);
-        dR.push_back(std::sqrt(dx*dx + dy*dy + dz*dz));
+        double zmin =  1e99;
+        double zmax = -1e99;
+        double sumZ  = 0.0;
+        double sumZ2 = 0.0;
+
+        for (int k = 0; k < nFiles; ++k) {
+            double z = allPoints[k][i].coords[2];
+            if (z < zmin) zmin = z;
+            if (z > zmax) zmax = z;
+            sumZ  += z;
+            sumZ2 += z*z;
+        }
+
+        double meanZ = sumZ / nFiles;
+        double varZ  = 0.0;
+        if (nFiles > 1) {
+            varZ = sumZ2 / nFiles - meanZ * meanZ;
+            if (varZ < 0) varZ = 0; // numerical safety
+        }
+        double sigma_mm = (nFiles > 1) ? std::sqrt(varZ) : 0.0;
+        double range_mm = zmax - zmin;
+
+        meanZ_mm[i]   = meanZ;
+        sigmaZ_um[i]  = sigma_mm * 1000.0;
+        rangeZ_um[i]  = range_mm * 1000.0;
+        Zmin_mm[i]    = zmin;
+        Zmax_mm[i]    = zmax;
     }
 
-    DiffStats sx = computeStats(dX);
-    DiffStats sy = computeStats(dY);
-    DiffStats sz = computeStats(dZ);
-    DiffStats sr = computeStats(dR);
+    // Global summaries
+    DiffStats statsSigmaUm = computeStats(sigmaZ_um);
+    DiffStats statsRangeUm = computeStats(rangeZ_um);
 
-    cout << fixed << setprecision(4)
-         << "\nComparison (" << n << " points)\n"
-         << "dX mean=" << sx.mean*1000 << " µm σ=" << sx.sigma*1000
-         << "\ndY mean=" << sy.mean*1000 << " µm σ=" << sy.sigma*1000
-         << "\ndZ mean=" << sz.mean*1000 << " µm σ=" << sz.sigma*1000
-         << "\ndR mean=" << sr.mean*1000 << " µm σ=" << sr.sigma*1000
-         << endl;
+    double maxSigmaUm = 0.0;
+    double maxRangeUm = 0.0;
+    for (size_t i = 0; i < nPoints; ++i) {
+        if (sigmaZ_um[i] > maxSigmaUm) maxSigmaUm = sigmaZ_um[i];
+        if (rangeZ_um[i] > maxRangeUm) maxRangeUm = rangeZ_um[i];
+    }
 
-    // ROOT startup
+    cout << "\nGlobal Z statistics across all points (" << nPoints
+         << " points, " << nFiles << " files):\n";
+    cout << "  Mean σ(Z)     = " << statsSigmaUm.mean << " µm\n";
+    cout << "  RMS spread σ(Z) across points = " << statsSigmaUm.sigma << " µm\n";
+    cout << "  Max  σ(Z)     = " << maxSigmaUm << " µm\n";
+    cout << "  Mean Range(Z) = " << statsRangeUm.mean << " µm\n";
+    cout << "  RMS spread Range(Z) across points = " << statsRangeUm.sigma << " µm\n";
+    cout << "  Max  Range(Z) = " << maxRangeUm << " µm\n";
+
+    //--------------------------------------------------------------------------
+    // ROOT startup and histogram of Range(Z)
+    //--------------------------------------------------------------------------
     TApplication app("app", &argc, argv);
     gROOT->SetBatch(false);
     gStyle->SetPalette(kBird);
     gStyle->SetNumberContours(64);
 
-    TFile outF(out.c_str(), "RECREATE");
+    TFile outF(outRoot.c_str(), "RECREATE");
 
-    //------------------------------------------------------------------------------
-    // Convert deltas to micrometers
-    //------------------------------------------------------------------------------
-    vector<double> dX_um(n), dY_um(n), dZ_um(n);
-    for (size_t i = 0; i < n; ++i) {
-        dX_um[i] = dX[i] * 1000.0;
-        dY_um[i] = dY[i] * 1000.0;
-        dZ_um[i] = dZ[i] * 1000.0;
-    }
-
-    //------------------------------------------------------------------------------
-    // Histogram ranges (±10% margin)
-    //------------------------------------------------------------------------------
     auto findRange = [&](const vector<double>& v, double& lo, double& hi) {
         auto [it1, it2] = minmax_element(v.begin(), v.end());
         lo = *it1;
@@ -141,33 +301,27 @@ int main(int argc, char* argv[])
         hi += m;
     };
 
-    double xmin, xmax, ymin, ymax, zmin, zmax;
-    findRange(dX_um, xmin, xmax);
-    findRange(dY_um, ymin, ymax);
-    findRange(dZ_um, zmin, zmax);
+    double rMin, rMax;
+    findRange(rangeZ_um, rMin, rMax);
 
-    auto hDX = new TH1D("hDX", "dX distribution;dX [#mum];Counts", 100, xmin, xmax);
-    auto hDY = new TH1D("hDY", "dY distribution;dY [#mum];Counts", 100, ymin, ymax);
-    auto hDZ = new TH1D("hDZ", "dZ distribution;dZ [#mum];Counts", 100, zmin, zmax);
+    auto hRange = new TH1D("hRangeZ",
+                           "Z range across files;Range [#mum];Counts",
+                           100, rMin, rMax);
 
-    for (size_t i = 0; i < n; ++i) {
-        hDX->Fill(dX_um[i]);
-        hDY->Fill(dY_um[i]);
-        hDZ->Fill(dZ_um[i]);
+    for (size_t i = 0; i < nPoints; ++i) {
+        hRange->Fill(rangeZ_um[i]);
     }
+    hRange->Write();
 
-    hDX->Write();
-    hDY->Write();
-    hDZ->Write();
-
-    //------------------------------------------------------------------------------
-    // Canvas with left (2D scatter) and right (histogram)
-    //------------------------------------------------------------------------------
-    TCanvas* c = new TCanvas("cFlat", "CompareScan: dZ map + histogram", 1200, 600);
+    //--------------------------------------------------------------------------
+    // Canvas: left = 2D scatter of Range(Z), right = histogram
+    //--------------------------------------------------------------------------
+    TCanvas* c = new TCanvas("cFlat", "CompareScan: Z range map + histogram",
+                             1200, 600);
     c->Divide(2, 1, 0.001, 0.001);
 
     //==========================================================================
-    // LEFT PAD — CLEAN 2D SCATTER, COLORED MARKERS + dZ LABELS (NO PALETTE BAR)
+    // LEFT PAD — 2D scatter, colored by Range(Z), optional integer labels
     //==========================================================================
     c->cd(1);
     gPad->SetRightMargin(0.05);
@@ -179,14 +333,14 @@ int main(int argc, char* argv[])
     gPad->SetFrameFillColor(kWhite);
     gPad->SetFrameFillStyle(0);
 
-    // Compute XY ranges with margins
-    double xminA = 1e99, xmaxA = -1e99;
-    double yminA = 1e99, ymaxA = -1e99;
-    for (size_t i = 0; i < n; ++i) {
-        xminA = std::min(xminA, A[i].coords[0]);
-        xmaxA = std::max(xmaxA, A[i].coords[0]);
-        yminA = std::min(yminA, A[i].coords[1]);
-        ymaxA = std::max(ymaxA, A[i].coords[1]);
+    // Compute XY ranges with small margins
+    double xminA =  1e99, xmaxA = -1e99;
+    double yminA =  1e99, ymaxA = -1e99;
+    for (size_t i = 0; i < nPoints; ++i) {
+        if (X[i] < xminA) xminA = X[i];
+        if (X[i] > xmaxA) xmaxA = X[i];
+        if (Y[i] < yminA) yminA = Y[i];
+        if (Y[i] > ymaxA) ymaxA = Y[i];
     }
     double dxA = xmaxA - xminA;
     double dyA = ymaxA - yminA;
@@ -195,56 +349,65 @@ int main(int argc, char* argv[])
     xminA -= 0.05 * dxA;  xmaxA += 0.05 * dxA;
     yminA -= 0.05 * dyA;  ymaxA += 0.05 * dyA;
 
-    // dZ range in micrometers for color mapping
-    double Zmin = *min_element(dZ_um.begin(), dZ_um.end());
-    double Zmax = *max_element(dZ_um.begin(), dZ_um.end());
-    double Zrange = Zmax - Zmin;
-    if (Zrange <= 0) Zrange = 1.0;
+    // Range(Z) for color mapping
+    double ZminRange = *min_element(rangeZ_um.begin(), rangeZ_um.end());
+    double ZmaxRange = *max_element(rangeZ_um.begin(), rangeZ_um.end());
+    double ZrangeRange = ZmaxRange - ZminRange;
+    if (ZrangeRange <= 0) ZrangeRange = 1.0;
 
     int nColors = gStyle->GetNumberOfColors();
     if (nColors < 2) nColors = 64;
 
-    // Frame: axes + optional grid, no fill, no palette
-    TH2D* frame = new TH2D("frame_xy", ";X [mm];Y [mm]",
-                           100, xminA, xmaxA,
-                           100, yminA, ymaxA);
-    frame->SetStats(false);
-    frame->SetFillStyle(0);
-    frame->Draw("AXIS");
-    frame->Draw("AXIG SAME");  // grid
+    // Frame: axes + grid
+    TH2D* frameXY = new TH2D("frame_xy", ";X [mm];Y [mm]",
+                             100, xminA, xmaxA,
+                             100, yminA, ymaxA);
+    frameXY->SetStats(false);
+    frameXY->SetFillStyle(0);
+    frameXY->Draw("AXIS");
+    frameXY->Draw("AXIG SAME");  // grid
 
-    // Draw colored markers + dZ labels
-    for (size_t i = 0; i < n; ++i) {
-        double xx = A[i].coords[0];
-        double yy = A[i].coords[1];
-        double zz = dZ_um[i];  // µm
+    // Draw colored markers (+ optional labels)
+    double ySpan = ymaxA - yminA;
+    double yOffset = 0.02 * ySpan;  // vertical offset for labels
 
-        double norm = (zz - Zmin) / Zrange;
-        norm = std::max(0.0, std::min(1.0, norm));
+    for (size_t i = 0; i < nPoints; ++i) {
+        double xx = X[i];
+        double yy = Y[i];
+        double zz = rangeZ_um[i]; // in µm
+
+        // Normalize to [0,1]
+        double norm = (zz - ZminRange) / ZrangeRange;
+        if (norm < 0.0) norm = 0.0;
+        if (norm > 1.0) norm = 1.0;
+
         int ci = gStyle->GetColorPalette(int(norm * (nColors - 1)));
 
-        // Marker
+        // Colored marker
         TMarker* m = new TMarker(xx, yy, 20);
         m->SetMarkerColor(ci);
         m->SetMarkerSize(1.8);
         m->Draw("SAME");
 
-        // Small label with dZ in µm above the marker
-        char buf[32];
-       	snprintf(buf, sizeof(buf), "%d", (int) llround(zz));
-        double yOffset = 0.02 * (ymaxA - yminA);      // 1% of Y range
-        TLatex* t = new TLatex(xx, yy + yOffset, buf);
-        t->SetTextSize(0.02);
-        t->SetTextColor(1);                          // black
-        t->SetTextAlign(21);                          // centered horizontally
-        t->Draw("SAME");
+        // Optional label: integer µm range
+        if (drawLabels) {
+            int zu = static_cast<int>(std::llround(zz));
+            std::string label = std::to_string(zu);
+
+            TLatex* t = new TLatex(xx, yy + yOffset, label.c_str());
+            t->SetTextSize(0.025);
+            t->SetTextColor(kBlack);  // strong contrast
+            t->SetTextFont(42);
+            t->SetTextAlign(21);      // centered horizontally
+            t->Draw("SAME");
+        }
     }
 
     gPad->Modified();
     gPad->Update();
 
     //==========================================================================
-    // RIGHT PAD — dZ histogram
+    // RIGHT PAD — histogram of Z range
     //==========================================================================
     c->cd(2);
 
@@ -253,24 +416,54 @@ int main(int argc, char* argv[])
     gPad->SetTopMargin(0.10);
     gPad->SetBottomMargin(0.12);
 
-    hDZ->SetFillColor(kAzure+7);
-    hDZ->SetLineColor(kBlue+3);
-    hDZ->SetLineWidth(2);
-    hDZ->Draw("HIST");
+    hRange->SetFillColor(kAzure+7);
+    hRange->SetLineColor(kBlue+3);
+    hRange->SetLineWidth(2);
+    hRange->Draw("HIST");
 
     gPad->Modified();
     gPad->Update();
 
-    //------------------------------------------------------------------------------
-    // Save outputs
-    //------------------------------------------------------------------------------
-    string pngOut = out.substr(0, out.find_last_of(".")) + ".png";
+    //--------------------------------------------------------------------------
+    // Stats CSV output (if requested)
+    //--------------------------------------------------------------------------
+    if (doStats) {
+		ofstream csv(statsCsvName.c_str());
+		if (!csv) {
+			cerr << "Error: could not open stats CSV file: " << statsCsvName << "\n";
+		} else {
+			csv << "index,label,X_mm,Y_mm,meanZ_mm,sigmaZ_um,rangeZ_um,Zmin_mm,Zmax_mm\n";
+			csv << std::setprecision(10);
+
+			for (size_t i = 0; i < nPoints; ++i) {
+				csv << (i+1) << ","
+					<< allPoints[0][i].label << ","
+					<< X[i] << ","
+					<< Y[i] << ","
+					<< meanZ_mm[i] << ","
+					<< sigmaZ_um[i] << ","
+					<< rangeZ_um[i] << ","
+					<< Zmin_mm[i] << ","
+					<< Zmax_mm[i] << "\n";
+			}
+
+			csv.close();
+			cout << "\nWrote per-point statistics to " << statsCsvName << "\n";
+		}
+	}
+
+
+    //--------------------------------------------------------------------------
+    // Save canvas and finish
+    //--------------------------------------------------------------------------
+    string pngOut = outRoot.substr(0, outRoot.find_last_of(".")) + ".png";
     c->SaveAs(pngOut.c_str());
-    cout << "Saved canvas image as " << pngOut << endl;
+    cout << "Saved canvas image as " << pngOut << "\n";
 
     c->Write("CompareScanCanvas");
 
-    cout << "\nWrote " << out << ". Close the canvas to exit.\n";
+    cout << "\nWrote ROOT output file: " << outRoot << "\n";
+    cout << "Close the canvas to exit.\n";
 
     app.Run();
     outF.Close();
