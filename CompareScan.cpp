@@ -1,6 +1,6 @@
 //==============================================================================
 // File: CompareScan.cpp
-// Version: 3.13
+// Version: 3.14.2
 //
 // Purpose:
 //   Compare N point files (same points, same ordering) and, for each point,
@@ -8,18 +8,33 @@
 //
 //       Zmin(i) = min_k Z_k(i)
 //       Zmax(i) = max_k Z_k(i)
-//       Range(i) = Zmax(i) - Zmin(i)
+//       RangeZ(i) = Zmax(i) - Zmin(i)
+//
+//   It also computes X and Y ranges across files:
+//
+//       Xmin(i) = min_k X_k(i)
+//       Xmax(i) = max_k X_k(i)
+//       RangeX(i) = Xmax(i) - Xmin(i)
+//
+//       Ymin(i) = min_k Y_k(i)
+//       Ymax(i) = max_k Y_k(i)
+//       RangeY(i) = Ymax(i) - Ymin(i)
 //
 //   Then:
-//     • Plot a 2D XY scatter where each point is colored by Range(i) in µm
-//     • Draw a 1D histogram of Range(i) in µm
-//     • Optionally label each point on the scatter with its Range(i) [µm]
-//     • Optionally write a CSV with per-point statistics across files.
-//     • Optionally define outliers by a range threshold and:
+//     • Plot a 2D XY scatter where each point is colored by RangeZ(i) in µm
+//       (color scale is computed from non-outliers only, if an outlier cut
+//        is applied; outliers always use a fixed red color).
+//     • Draw a 1D histogram of RangeZ(i) in µm
+//     • Optionally label each point on the scatter with its RangeZ(i) [µm]
+//     • Optionally write a CSV with per-point statistics across files:
+//         - Including RangeX and RangeY in µm
+//     • Optionally define outliers by a Z-range threshold and:
 //         - Exclude them from global statistics
 //         - Color them red in the scatter
 //         - Color their histogram bars red
 //         - Flag them in the CSV
+//     • Additionally, write 1D histograms of RangeX(i) and RangeY(i) in µm
+//       into the ROOT file (not drawn on the main canvas).
 //
 // Usage:
 //   ./CompareScan [--labels] [--stats [stats.csv]] [--outl N] \
@@ -31,7 +46,7 @@
 //   - --stats      : enable statistics CSV output
 //       * If followed by a filename, use that (e.g. --stats myStats.csv)
 //       * Otherwise use: <root_output_basename>_stats.csv
-//   - --outl N     : define outliers as points with Range(i) > N µm
+//   - --outl N     : define outliers as points with RangeZ(i) > N µm
 //       * Outliers are:
 //           · Excluded from global statistics
 //           · Shown in red in the scatter and histogram
@@ -39,20 +54,23 @@
 //
 // Output:
 //   - ROOT file (out.root) with:
-//       * XY scatter canvas (left pad)
-//       * Range histogram (right pad, blue=good, red=outliers)
+//       * XY scatter canvas (left pad, colored by Z range)
+//       * Z range histogram (right pad, blue=good, red=outliers)
+//       * Additional 1D histograms for RangeX and RangeY (µm) stored only
+//         in the ROOT file (not attached to the main canvas).
 //   - PNG snapshot of the canvas.
 //   - If --stats is used, a CSV with per-point statistics:
 //       index, label, X_mm, Y_mm, meanZ_mm, sigmaZ_um, rangeZ_um,
-//       Zmin_mm, Zmax_mm, isOut
+//       rangeX_um, rangeY_um, Zmin_mm, Zmax_mm, isOut
 //
 // Notes:
-//   - X,Y are taken from the first file.
+//   - X,Y are taken from the first file for plotting, but RangeX/Y values
+//     are computed across all files.
 //   - All files must have at least as many points as the shortest one; extra
 //     points in longer files are ignored (a warning is printed).
 //==============================================================================
 
-#define COMPARESCAN_VERSION "v3.13"
+#define COMPARESCAN_VERSION "v3.14.2"
 
 #include <iostream>
 #include <fstream>
@@ -254,9 +272,11 @@ int main(int argc, char* argv[])
     vector<double> X(nPoints), Y(nPoints);
     vector<double> meanZ_mm(nPoints), sigmaZ_um(nPoints), rangeZ_um(nPoints);
     vector<double> Zmin_mm(nPoints), Zmax_mm(nPoints);
+    vector<double> rangeX_um(nPoints), rangeY_um(nPoints);
     vector<int>    isOut(nPoints, 0);
 
     for (size_t i = 0; i < nPoints; ++i) {
+        // Use first file as nominal X,Y for plotting
         X[i] = allPoints[0][i].coords[0];
         Y[i] = allPoints[0][i].coords[1];
 
@@ -265,8 +285,21 @@ int main(int argc, char* argv[])
         double sumZ  = 0.0;
         double sumZ2 = 0.0;
 
+        double xmin =  1e99;
+        double xmax = -1e99;
+        double ymin =  1e99;
+        double ymax = -1e99;
+
         for (int k = 0; k < nFiles; ++k) {
+            double x = allPoints[k][i].coords[0];
+            double y = allPoints[k][i].coords[1];
             double z = allPoints[k][i].coords[2];
+
+            if (x < xmin) xmin = x;
+            if (x > xmax) xmax = x;
+            if (y < ymin) ymin = y;
+            if (y > ymax) ymax = y;
+
             if (z < zmin) zmin = z;
             if (z > zmax) zmax = z;
             sumZ  += z;
@@ -277,15 +310,18 @@ int main(int argc, char* argv[])
         double varZ  = (nFiles > 1) ? (sumZ2 / nFiles - meanZ * meanZ) : 0.0;
         if (varZ < 0) varZ = 0.0;
 
-        meanZ_mm[i]  = meanZ;
-        sigmaZ_um[i] = std::sqrt(varZ) * 1000.0;
-        rangeZ_um[i] = (zmax - zmin) * 1000.0;
-        Zmin_mm[i]   = zmin;
-        Zmax_mm[i]   = zmax;
+        meanZ_mm[i]   = meanZ;
+        sigmaZ_um[i]  = std::sqrt(varZ) * 1000.0;
+        rangeZ_um[i]  = (zmax - zmin) * 1000.0;
+        Zmin_mm[i]    = zmin;
+        Zmax_mm[i]    = zmax;
+
+        rangeX_um[i]  = (xmax - xmin) * 1000.0;
+        rangeY_um[i]  = (ymax - ymin) * 1000.0;
     }
 
     //--------------------------------------------------------------------------
-    // Outliers
+    // Outliers (based on Z range only)
     //--------------------------------------------------------------------------
     size_t nOutliers = 0;
     if (useOutlierCut) {
@@ -315,7 +351,7 @@ int main(int argc, char* argv[])
     }
 
     //--------------------------------------------------------------------------
-    // Global statistics (microns with 1 decimal)
+    // Global statistics (microns with 1 decimal, Z only)
     //--------------------------------------------------------------------------
     cout << std::fixed << std::setprecision(1);
     cout << "\nGlobal Z statistics:\n";
@@ -353,7 +389,7 @@ int main(int argc, char* argv[])
     TFile outF(outRoot.c_str(), "RECREATE");
 
     //--------------------------------------------------------------------------
-    // Canvas: scatter + histogram
+    // Canvas: scatter + Z-range histogram
     //--------------------------------------------------------------------------
     TCanvas* c = new TCanvas("cFlat",
                              "CompareScan: Z range map + histogram",
@@ -384,8 +420,41 @@ int main(int argc, char* argv[])
     xminA -= 0.05 * dxA;  xmaxA += 0.05 * dxA;
     yminA -= 0.05 * dyA;  ymaxA += 0.05 * dyA;
 
-    double ZminRange = *std::min_element(rangeZ_um.begin(), rangeZ_um.end());
-    double ZmaxRange = *std::max_element(rangeZ_um.begin(), rangeZ_um.end());
+    // Determine color scale limits for Z range:
+    // - If outlier cut is used and there are non-outliers, use ONLY good points
+    //   to set ZminRange / ZmaxRange.
+    // - If there are no good points (all outliers) or no cut is used, fall
+    //   back to using all points.
+    double ZminRange = 0.0;
+    double ZmaxRange = 0.0;
+    if (useOutlierCut) {
+        double mnGood =  1e99;
+        double mxGood = -1e99;
+        bool   anyGood = false;
+        for (size_t i = 0; i < nPoints; ++i) {
+            if (!isOut[i]) {
+                anyGood = true;
+                double v = rangeZ_um[i];
+                if (v < mnGood) mnGood = v;
+                if (v > mxGood) mxGood = v;
+            }
+        }
+        if (anyGood) {
+            ZminRange = mnGood;
+            ZmaxRange = mxGood;
+        } else {
+            auto [mnAll, mxAll] = std::minmax_element(rangeZ_um.begin(),
+                                                      rangeZ_um.end());
+            ZminRange = *mnAll;
+            ZmaxRange = *mxAll;
+        }
+    } else {
+        auto [mnAll, mxAll] = std::minmax_element(rangeZ_um.begin(),
+                                                  rangeZ_um.end());
+        ZminRange = *mnAll;
+        ZmaxRange = *mxAll;
+    }
+
     double ZrangeRange = ZmaxRange - ZminRange;
     if (ZrangeRange <= 0) ZrangeRange = 1.0;
 
@@ -415,7 +484,7 @@ int main(int argc, char* argv[])
         int ci = gStyle->GetColorPalette(int(norm * (nColors - 1)));
 
         if (useOutlierCut && isOut[i]) {
-            ci = kRed+1;   // outliers red
+            ci = kRed+1;   // outliers red, independent of color scale
         }
 
         TMarker* m = new TMarker(xx, yy, 20);
@@ -469,13 +538,14 @@ int main(int argc, char* argv[])
     }
 
     int nBinsHist = static_cast<int>(rAllMax - rAllMin);
+    if (nBinsHist <= 0) nBinsHist = 1;
 
     TH1D* hGood = new TH1D("hRangeGood",
-                           "Z range across files;Range [#mum];Counts",
+                           "Z range across files;Range_{Z} [#mum];Counts",
                            nBinsHist, rAllMin, rAllMax);
 
     TH1D* hOutl = new TH1D("hRangeOutl",
-                           "Z range outliers",
+                           "Z range outliers;Range_{Z} [#mum];Counts",
                            nBinsHist, rAllMin, rAllMax);
 
     // Fill good and outlier histograms
@@ -535,9 +605,54 @@ int main(int argc, char* argv[])
     gPad->Modified();
     gPad->Update();
 
-    // Write histograms to file as well
+    // Write Z-range histograms to file as well
     hGood->Write();
     hOutl->Write();
+
+    //==========================================================================
+    // ADDITIONAL HISTOGRAMS — RangeX and RangeY (µm), ROOT file only
+    //==========================================================================
+    // X range
+    double rXMin = 0.0;
+    double rXMax = 1.0;
+    if (!rangeX_um.empty()) {
+        auto [mnX, mxX] = std::minmax_element(rangeX_um.begin(),
+                                              rangeX_um.end());
+        rXMin = std::floor(*mnX);
+        rXMax = std::ceil(*mxX);
+        if (rXMax <= rXMin) rXMax = rXMin + 1.0;
+    }
+    int nBinsX = static_cast<int>(rXMax - rXMin);
+    if (nBinsX <= 0) nBinsX = 1;
+
+    TH1D* hRangeX = new TH1D("hRangeX",
+                             "X range across files;Range_{X} [#mum];Counts",
+                             nBinsX, rXMin, rXMax);
+    for (size_t i = 0; i < nPoints; ++i) {
+        hRangeX->Fill(rangeX_um[i]);
+    }
+    hRangeX->Write();
+
+    // Y range
+    double rYMin = 0.0;
+    double rYMax = 1.0;
+    if (!rangeY_um.empty()) {
+        auto [mnY, mxY] = std::minmax_element(rangeY_um.begin(),
+                                              rangeY_um.end());
+        rYMin = std::floor(*mnY);
+        rYMax = std::ceil(*mxY);
+        if (rYMax <= rYMin) rYMax = rYMin + 1.0;
+    }
+    int nBinsY = static_cast<int>(rYMax - rYMin);
+    if (nBinsY <= 0) nBinsY = 1;
+
+    TH1D* hRangeY = new TH1D("hRangeY",
+                             "Y range across files;Range_{Y} [#mum];Counts",
+                             nBinsY, rYMin, rYMax);
+    for (size_t i = 0; i < nPoints; ++i) {
+        hRangeY->Fill(rangeY_um[i]);
+    }
+    hRangeY->Write();
 
     //--------------------------------------------------------------------------
     // Save canvas and PNG
@@ -556,7 +671,7 @@ int main(int argc, char* argv[])
                  << statsCsvName << "\n";
         } else {
             csv << "index,label,X_mm,Y_mm,meanZ_mm,sigmaZ_um,rangeZ_um,"
-                   "Zmin_mm,Zmax_mm,isOut\n";
+                   "rangeX_um,rangeY_um,Zmin_mm,Zmax_mm,isOut\n";
 
             for (size_t i = 0; i < nPoints; ++i) {
                 // mm-format: 3 decimals
@@ -568,7 +683,9 @@ int main(int argc, char* argv[])
 
                 // µm-format: 1 decimal
                 double sigma_um = sigmaZ_um[i];
-                double range_um = rangeZ_um[i];
+                double rangeZ   = rangeZ_um[i];
+                double rangeX   = rangeX_um[i];
+                double rangeY   = rangeY_um[i];
 
                 csv << std::fixed
                     << std::setprecision(0) << (i + 1) << ",";
@@ -577,7 +694,9 @@ int main(int argc, char* argv[])
                 csv << std::fixed << std::setprecision(3) << y_mm << ",";
                 csv << std::fixed << std::setprecision(3) << meanZ << ",";
                 csv << std::fixed << std::setprecision(1) << sigma_um << ",";
-                csv << std::fixed << std::setprecision(1) << range_um << ",";
+                csv << std::fixed << std::setprecision(1) << rangeZ << ",";
+                csv << std::fixed << std::setprecision(1) << rangeX << ",";
+                csv << std::fixed << std::setprecision(1) << rangeY << ",";
                 csv << std::fixed << std::setprecision(3) << zmin_mm << ",";
                 csv << std::fixed << std::setprecision(3) << zmax_mm << ",";
                 csv << isOut[i] << "\n";
