@@ -98,6 +98,48 @@
 
 using namespace std;
 
+
+///////////////////////////////////////////////
+// Helper functions                          //
+///////////////////////////////////////////////
+//
+// Resolve input path:
+//  - absolute → unchanged
+//  - relative → prepend CMM_DATA if set, else unchanged
+//
+static std::string resolveInputPath(const std::string& path)
+{
+    if (path.empty()) return path;
+
+    std::filesystem::path p(path);
+    if (p.is_absolute()) return path;
+
+    const char* base = std::getenv("CMM_DATA");
+    if (base && *base) {
+        return (std::filesystem::path(base) / p).string();
+    }
+
+    return path;
+}
+
+// Resolve output path:
+static std::string resolveOutputPath(const std::string& path)
+{
+    if (path.empty()) return path;
+
+    std::filesystem::path p(path);
+    if (p.is_absolute()) return path;
+
+    const char* base = std::getenv("CMM_RESULTS");
+    if (base && *base) {
+        return (std::filesystem::path(base) / "ExpansionScan" / p).string();
+    }
+
+    // No CMM_RESULTS: write to current working directory
+    return path;
+}
+
+
 //------------------------------------------------------------------------------
 // Simple statistics container
 //------------------------------------------------------------------------------
@@ -237,13 +279,15 @@ int main(int argc, char* argv[])
     int nFiles = static_cast<int>(positional.size());
     vector<vector<Point>> allPoints(nFiles);
 
-    for (int k = 0; k < nFiles; ++k) {
-        allPoints[k] = readPoints(positional[k], 3);
-        if (allPoints[k].empty()) {
-            cerr << "Error: file " << positional[k] << " yielded no points.\n";
-            return 1;
-        }
-    }
+	for (int k = 0; k < nFiles; ++k) {
+		positional[k] = resolveInputPath(positional[k]);
+		allPoints[k] = readPoints(positional[k], 3);
+		if (allPoints[k].empty()) {
+			cerr << "Error: file " << positional[k] << " yielded no points.\n";
+			return 1;
+		}
+	}
+
 
     // Find common number of points
     size_t nPoints = allPoints[0].size();
@@ -385,7 +429,8 @@ int main(int argc, char* argv[])
     //--------------------------------------------------------------------------
     TApplication app("app", &argc, argv);
     gStyle->SetPalette(kBird);
-    gStyle->SetNumberContours(64);
+    gStyle->SetNumberContours(64);   
+    outRoot = resolveOutputPath(outRoot);
     TFile outF(outRoot.c_str(), "RECREATE");
 
     //--------------------------------------------------------------------------
@@ -665,6 +710,7 @@ int main(int argc, char* argv[])
     // Stats CSV output
     //--------------------------------------------------------------------------
     if (doStats) {
+    	statsCsvName = resolveOutputPath(statsCsvName);
         ofstream csv(statsCsvName.c_str());
         if (!csv) {
             cerr << "Error: could not open stats CSV file: "
