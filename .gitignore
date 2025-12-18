@@ -1,0 +1,12 @@
+# Build artifacts
+*.o
+*.dSYM/
+CompareScan
+
+# ROOT / plots
+*.root
+*.png
+
+# Editor / OS noise
+.DS_Store
+
